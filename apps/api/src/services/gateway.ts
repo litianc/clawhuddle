@@ -594,6 +594,30 @@ export async function redeployGateway(orgId: string, memberId: string) {
   };
 }
 
+export async function redeployAllGateways(orgId: string) {
+  const db = getDb();
+  const members = db
+    .prepare(
+      "SELECT id FROM org_members WHERE org_id = ? AND gateway_port IS NOT NULL",
+    )
+    .all(orgId) as { id: string }[];
+
+  const results: { memberId: string; gateway_status: string }[] = [];
+  const errors: { memberId: string; error: string }[] = [];
+
+  for (const { id: memberId } of members) {
+    try {
+      const result = await redeployGateway(orgId, memberId);
+      results.push({ memberId, gateway_status: result.gateway_status });
+    } catch (err: any) {
+      console.error(`Failed to redeploy gateway for member ${memberId}:`, err.message);
+      errors.push({ memberId, error: err.message });
+    }
+  }
+
+  return { results, errors };
+}
+
 export async function getGatewayStatus(orgId: string, memberId: string) {
   const db = getDb();
   const member = getMember(orgId, memberId);

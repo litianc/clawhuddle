@@ -7,6 +7,7 @@ import {
   startGateway,
   removeGateway,
   redeployGateway,
+  redeployAllGateways,
   getGatewayStatus,
 } from '../../services/gateway.js';
 
@@ -70,6 +71,21 @@ export async function orgGatewayRoutes(app: FastifyInstance) {
       const { orgId, memberId } = request.params;
       try {
         const result = await stopGateway(orgId, memberId);
+        return { data: result };
+      } catch (err: any) {
+        return reply.status(400).send({ error: 'gateway_error', message: err.message });
+      }
+    }
+  );
+
+  // Redeploy all gateways
+  app.post<{ Params: { orgId: string } }>(
+    '/api/orgs/:orgId/gateways/redeploy-all',
+    { preHandler: requireRole('owner', 'admin') },
+    async (request, reply) => {
+      const { orgId } = request.params;
+      try {
+        const result = await redeployAllGateways(orgId);
         return { data: result };
       } catch (err: any) {
         return reply.status(400).send({ error: 'gateway_error', message: err.message });

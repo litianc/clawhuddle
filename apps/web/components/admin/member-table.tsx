@@ -63,6 +63,7 @@ export function MemberTable({ initialMembers }: Props) {
   const [inviting, setInviting] = useState(false);
   const [limitHit, setLimitHit] = useState(false);
   const [loadingGateway, setLoadingGateway] = useState<string | null>(null);
+  const [redeployingAll, setRedeployingAll] = useState(false);
 
   const orgFetch = useCallback(
     <T,>(path: string, options?: RequestInit) => {
@@ -183,6 +184,29 @@ export function MemberTable({ initialMembers }: Props) {
     }
   };
 
+  const hasDeployedGateway = members.some((m) => m.gateway_port != null);
+
+  const redeployAll = async () => {
+    setRedeployingAll(true);
+    try {
+      const res = await orgFetch<{ data: { results: any[]; errors: any[] } }>(
+        '/gateways/redeploy-all',
+        { method: 'POST' },
+      );
+      const { results, errors } = res.data;
+      if (errors.length > 0) {
+        toast(`Redeployed ${results.length}, failed ${errors.length}`, 'error');
+      } else {
+        toast(`Redeploying ${results.length} gateway${results.length === 1 ? '' : 's'}`, 'success');
+      }
+      await refresh();
+    } catch (err: any) {
+      toast(err.message, 'error');
+    } finally {
+      setRedeployingAll(false);
+    }
+  };
+
   const openGateway = (member: OrgMember) => {
     if (!member.gateway_token) return;
     const { protocol, hostname } = window.location;
@@ -288,6 +312,21 @@ export function MemberTable({ initialMembers }: Props) {
         <span className="text-xs tabular-nums" style={{ color: 'var(--text-tertiary)' }}>
           {members.length} members
         </span>
+        {hasDeployedGateway && (
+          <button
+            onClick={redeployAll}
+            disabled={redeployingAll}
+            className="ml-auto px-3 py-2 rounded-lg text-xs font-medium transition-all disabled:opacity-50"
+            style={{
+              background: 'var(--bg-tertiary)',
+              color: 'var(--text-secondary)',
+            }}
+            onMouseEnter={(e) => { if (!redeployingAll) e.currentTarget.style.background = 'var(--bg-hover)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--bg-tertiary)'; }}
+          >
+            {redeployingAll ? 'Redeploying...' : 'Redeploy All Gateways'}
+          </button>
+        )}
       </div>
 
       {/* Member limit banner */}
