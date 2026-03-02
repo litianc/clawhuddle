@@ -42,6 +42,8 @@ export interface OpenClawConfig {
     controlUi: {
       enabled: boolean;
       allowInsecureAuth: boolean;
+      allowedOrigins?: string[];
+      dangerouslyAllowHostHeaderOriginFallback?: boolean;
     };
     auth: {
       mode: string;
@@ -70,6 +72,10 @@ export function generateOpenClawConfig(options: {
   /** Per-provider model overrides from DB (provider id -> model id) */
   modelOverrides?: Record<string, string>;
   channelTokens?: ChannelTokens;
+  /** Explicit allowed origins for Control UI (e.g. ["https://claw-xx.example.com"]) */
+  allowedOrigins?: string[];
+  /** Use Host-header fallback for origin check (local dev only) */
+  useHostHeaderFallback?: boolean;
 }): OpenClawConfig {
   const { port, token } = options;
   const channels = options.enabledChannels ?? CHANNEL_PLUGINS;
@@ -96,6 +102,8 @@ export function generateOpenClawConfig(options: {
       controlUi: {
         enabled: true,
         allowInsecureAuth: true,
+        ...(options.allowedOrigins?.length ? { allowedOrigins: options.allowedOrigins } : {}),
+        ...(options.useHostHeaderFallback ? { dangerouslyAllowHostHeaderOriginFallback: true } : {}),
       },
       auth: {
         mode: 'token',

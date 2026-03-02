@@ -262,6 +262,17 @@ export function syncAuthProfiles(orgId: string): void {
 
 const IS_LOCAL_DEV = DOMAIN === "localhost";
 
+/** Compute Control UI allowed origins for a gateway subdomain. */
+function getControlUiOrigins(subdomain: string): { allowedOrigins?: string[]; useHostHeaderFallback?: boolean } {
+  if (IS_LOCAL_DEV) {
+    // Local dev uses random ports — fall back to Host header
+    return { useHostHeaderFallback: true };
+  }
+  // Production: explicit origins (both http and https in case of external SSL termination)
+  const host = `${subdomain}.${GATEWAY_DOMAIN}`;
+  return { allowedOrigins: [`http://${host}`, `https://${host}`] };
+}
+
 function createContainerConfig(
   containerName: string,
   subdomain: string,
@@ -349,6 +360,7 @@ export async function provisionGateway(orgId: string, memberId: string) {
     activeProviderIds: providerIds,
     modelOverrides,
     channelTokens,
+    ...getControlUiOrigins(subdomain),
   });
   fs.writeFileSync(
     path.join(gatewayDir, "openclaw.json"),
@@ -531,6 +543,7 @@ export async function redeployGateway(orgId: string, memberId: string) {
     activeProviderIds: providerIds,
     modelOverrides,
     channelTokens,
+    ...getControlUiOrigins(member.gateway_subdomain),
   };
 
   // Merge into existing config to preserve user customizations;
