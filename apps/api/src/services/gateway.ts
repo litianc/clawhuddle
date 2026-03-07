@@ -7,7 +7,7 @@ import { getOrgAllApiKeys } from "../routes/org/api-keys.js";
 import { generateOpenClawConfig, mergeOpenClawConfig, type ChannelTokens } from "./openclaw-config.js";
 import { installSkillsForUser } from "./skill-installer.js";
 import type { Skill, OrgMember } from "@clawhuddle/shared";
-import { PROVIDERS } from "@clawhuddle/shared";
+import { PROVIDERS, CUSTOM_PROVIDER_ID, type CustomApiFormat } from "@clawhuddle/shared";
 
 const docker = new Docker();
 
@@ -166,18 +166,35 @@ function createTraefikLabels(
   };
 }
 
+interface CustomProviderData {
+  baseUrl: string;
+  apiKey: string;
+  apiFormat: CustomApiFormat;
+  modelId: string;
+}
+
 /**
  * Writes auth-profiles.json for a gateway so OpenClaw reads credentials
  * from the file (hot-reloaded) instead of env vars.
  * Returns the list of provider IDs that have credentials configured.
+ * Custom provider credentials go into openclaw.json (not auth-profiles.json).
  */
-function writeAuthProfiles(orgId: string, userId: string): { providerIds: string[]; modelOverrides: Record<string, string> } {
+function writeAuthProfiles(orgId: string, userId: string): { providerIds: string[]; modelOverrides: Record<string, string>; customProvider?: CustomProviderData } {
   const allKeys = getOrgAllApiKeys(orgId);
   const profiles: Record<string, Record<string, unknown>> = {};
   const providerIds: string[] = [];
   const modelOverrides: Record<string, string> = {};
+  let customProvider: CustomProviderData | undefined;
 
-  for (const { provider, key, credential_type, default_model } of allKeys) {
+  for (const { provider, key, credential_type, default_model, base_url, api_format, custom_label } of allKeys) {
+    // Custom provider credentials go into openclaw.json agents.providers, not auth-profiles
+    if (provider === CUSTOM_PROVIDER_ID) {
+      if (base_url && api_format && default_model) {
+        customProvider = { baseUrl: base_url, apiKey: key, apiFormat: api_format, modelId: default_model };
+      }
+      continue;
+    }
+
     const providerConfig = PROVIDERS.find((p) => p.id === provider);
     if (!providerConfig) continue;
     providerIds.push(provider);
@@ -236,26 +253,44 @@ function writeAuthProfiles(orgId: string, userId: string): { providerIds: string
     JSON.stringify({ version: 1, profiles }, null, 2),
   );
 
-  return { providerIds, modelOverrides };
+  return { providerIds, modelOverrides, customProvider };
 }
 
 /**
  * Live-update auth-profiles.json for all running gateways in an org.
  * Called after API key add/delete so credentials propagate without container restart.
+ * Also patches openclaw.json to update agents.providers for custom provider changes.
  */
 export function syncAuthProfiles(orgId: string): void {
   const db = getDb();
   const runningMembers = db
     .prepare(
-      `SELECT om.user_id FROM org_members om
+      `SELECT om.user_id, om.gateway_port, om.gateway_token, om.gateway_subdomain FROM org_members om
      WHERE om.org_id = ? AND om.gateway_status IN ('running', 'deploying')`,
     )
-    .all(orgId) as { user_id: string }[];
+    .all(orgId) as { user_id: string; gateway_port: number; gateway_token: string; gateway_subdomain: string }[];
 
-  for (const { user_id } of runningMembers) {
+  for (const { user_id, gateway_port, gateway_token, gateway_subdomain } of runningMembers) {
     const gatewayDir = getGatewayDir(orgId, user_id);
-    if (fs.existsSync(gatewayDir)) {
-      writeAuthProfiles(orgId, user_id);
+    if (!fs.existsSync(gatewayDir)) continue;
+
+    const { providerIds, modelOverrides, customProvider } = writeAuthProfiles(orgId, user_id);
+
+    // Patch openclaw.json in-place to update agents.providers and model defaults
+    const configPath = path.join(gatewayDir, "openclaw.json");
+    try {
+      const existing = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      const updated = mergeOpenClawConfig(existing, {
+        port: gateway_port || GATEWAY_INTERNAL_PORT,
+        token: gateway_token,
+        activeProviderIds: providerIds,
+        modelOverrides,
+        customProvider,
+        ...getControlUiOrigins(gateway_subdomain),
+      });
+      fs.writeFileSync(configPath, JSON.stringify(updated, null, 2));
+    } catch {
+      // Config file may not exist yet — skip
     }
   }
 }
@@ -343,8 +378,8 @@ export async function provisionGateway(orgId: string, memberId: string) {
   fs.mkdirSync(gatewayDir, { recursive: true });
 
   // Write auth-profiles.json (credentials read from file, not env vars)
-  const { providerIds, modelOverrides } = writeAuthProfiles(orgId, member.user_id);
-  if (providerIds.length === 0)
+  const { providerIds, modelOverrides, customProvider } = writeAuthProfiles(orgId, member.user_id);
+  if (providerIds.length === 0 && !customProvider)
     throw new Error("No API keys configured — add at least one provider key");
 
   // Get member's skills
@@ -359,6 +394,7 @@ export async function provisionGateway(orgId: string, memberId: string) {
     token,
     activeProviderIds: providerIds,
     modelOverrides,
+    customProvider,
     channelTokens,
     ...getControlUiOrigins(subdomain),
   });
@@ -526,8 +562,8 @@ export async function redeployGateway(orgId: string, memberId: string) {
   }
 
   // Write auth-profiles.json (credentials read from file, not env vars)
-  const { providerIds, modelOverrides } = writeAuthProfiles(orgId, member.user_id);
-  if (providerIds.length === 0)
+  const { providerIds, modelOverrides, customProvider } = writeAuthProfiles(orgId, member.user_id);
+  if (providerIds.length === 0 && !customProvider)
     throw new Error("No API keys configured — add at least one provider key");
 
   // Read channel tokens (e.g. Telegram bot token)
@@ -542,6 +578,7 @@ export async function redeployGateway(orgId: string, memberId: string) {
     token: member.gateway_token,
     activeProviderIds: providerIds,
     modelOverrides,
+    customProvider,
     channelTokens,
     ...getControlUiOrigins(member.gateway_subdomain),
   };

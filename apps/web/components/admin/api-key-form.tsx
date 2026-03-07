@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useToast } from '@/components/ui/toast';
-import { PROVIDERS, type CredentialType, type ModelOption } from '@clawhuddle/shared';
+import { PROVIDERS, CUSTOM_PROVIDER_ID, type CredentialType, type ModelOption, type CustomApiFormat } from '@clawhuddle/shared';
 
 type FetchFn = <T>(path: string, options?: RequestInit) => Promise<T>;
 
@@ -13,6 +13,9 @@ export interface ApiKeyDisplay {
   is_company_default: boolean;
   credential_type?: CredentialType;
   default_model?: string | null;
+  base_url?: string | null;
+  api_format?: string | null;
+  custom_label?: string | null;
 }
 
 interface Props {
@@ -124,7 +127,46 @@ export function ApiKeyForm({ initialKeys, fetchFn }: Props) {
     }
   };
 
+  // Custom provider state
+  const [customLabel, setCustomLabel] = useState('');
+  const [customBaseUrl, setCustomBaseUrl] = useState('');
+  const [customApiFormat, setCustomApiFormat] = useState<CustomApiFormat>('openai-completions');
+  const [customApiKey, setCustomApiKey] = useState('');
+  const [customModelName, setCustomModelName] = useState('');
+
   const currentKey = (provider: string) => keys.find((k) => k.provider === provider);
+  const existingCustom = currentKey(CUSTOM_PROVIDER_ID);
+
+  const saveCustomProvider = async () => {
+    if (!customBaseUrl.trim() || !customApiKey.trim() || !customModelName.trim()) {
+      toast('Base URL, API Key, and Model Name are required', 'error');
+      return;
+    }
+    setSaving(true);
+    try {
+      await fetchFn('/api-keys', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider: CUSTOM_PROVIDER_ID,
+          key: customApiKey.trim(),
+          baseUrl: customBaseUrl.trim(),
+          apiFormat: customApiFormat,
+          defaultModel: customModelName.trim(),
+          customLabel: customLabel.trim() || undefined,
+        }),
+      });
+      setCustomLabel('');
+      setCustomBaseUrl('');
+      setCustomApiKey('');
+      setCustomModelName('');
+      await refresh();
+      toast('Custom provider saved', 'success');
+    } catch (err: any) {
+      toast(err.message, 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="space-y-6 max-w-lg">
@@ -282,6 +324,117 @@ export function ApiKeyForm({ initialKeys, fetchFn }: Props) {
           </div>
         );
       })}
+
+      {/* Custom Provider Section */}
+      <div
+        className="p-5 rounded-xl"
+        style={{
+          background: 'var(--bg-primary)',
+          border: '1px solid var(--border-subtle)',
+        }}
+      >
+        <h3
+          className="text-sm font-semibold mb-3"
+          style={{ color: 'var(--text-primary)' }}
+        >
+          Custom Provider
+        </h3>
+        <p className="text-xs mb-3" style={{ color: 'var(--text-tertiary)' }}>
+          Connect a third-party LLM API (OpenAI-compatible or Anthropic-compatible).
+        </p>
+
+        {existingCustom ? (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <span
+                className="text-xs font-medium"
+                style={{ color: 'var(--text-secondary)' }}
+              >
+                {existingCustom.custom_label || 'Custom'}
+              </span>
+              <code
+                className="px-1.5 py-0.5 rounded text-[11px] font-mono"
+                style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}
+              >
+                {existingCustom.key_masked}
+              </code>
+              <button
+                onClick={() => deleteKey(existingCustom.id, existingCustom.custom_label || 'Custom provider')}
+                disabled={saving}
+                className="text-xs px-2 py-0.5 rounded transition-colors disabled:opacity-50"
+                style={{ color: 'var(--text-tertiary)' }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--error, #ef4444)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-tertiary)'; }}
+              >
+                Delete
+              </button>
+            </div>
+            <div className="text-[11px] font-mono space-y-0.5" style={{ color: 'var(--text-tertiary)' }}>
+              <div>URL: {existingCustom.base_url}</div>
+              <div>Format: {existingCustom.api_format}</div>
+              <div>Model: {existingCustom.default_model}</div>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <input
+              type="text"
+              value={customLabel}
+              onChange={(e) => setCustomLabel(e.target.value)}
+              placeholder="Display Name (optional)"
+              className="w-full px-3 py-2 text-sm rounded-lg"
+            />
+            <input
+              type="text"
+              value={customBaseUrl}
+              onChange={(e) => setCustomBaseUrl(e.target.value)}
+              placeholder="Base URL (e.g. https://api.example.com/v1)"
+              className="w-full px-3 py-2 text-sm rounded-lg"
+            />
+            <select
+              value={customApiFormat}
+              onChange={(e) => setCustomApiFormat(e.target.value as CustomApiFormat)}
+              className="w-full px-3 py-2 text-sm rounded-lg"
+              style={{
+                background: 'var(--bg-tertiary)',
+                color: 'var(--text-secondary)',
+                border: '1px solid var(--border-subtle)',
+              }}
+            >
+              <option value="openai-completions">OpenAI Completions</option>
+              <option value="openai-responses">OpenAI Responses</option>
+              <option value="anthropic-messages">Anthropic Messages</option>
+            </select>
+            <input
+              type="password"
+              value={customApiKey}
+              onChange={(e) => setCustomApiKey(e.target.value)}
+              placeholder="API Key"
+              className="w-full px-3 py-2 text-sm rounded-lg"
+            />
+            <input
+              type="text"
+              value={customModelName}
+              onChange={(e) => setCustomModelName(e.target.value)}
+              placeholder="Model Name (e.g. gpt-4o)"
+              className="w-full px-3 py-2 text-sm rounded-lg"
+            />
+            <button
+              onClick={saveCustomProvider}
+              disabled={saving}
+              className="w-full px-4 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-50"
+              style={{
+                background: 'var(--accent)',
+                color: 'var(--text-inverse)',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--accent-hover)'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--accent)'; }}
+            >
+              Save Custom Provider
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

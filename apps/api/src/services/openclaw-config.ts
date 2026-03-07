@@ -1,4 +1,4 @@
-import { PROVIDERS } from '@clawhuddle/shared';
+import { PROVIDERS, type CustomApiFormat } from '@clawhuddle/shared';
 
 // Channel plugins that have working dependencies in the Docker image.
 // Excluded: matrix, nostr, tlon, twitch (missing npm modules in OpenClaw image)
@@ -57,6 +57,7 @@ export interface OpenClawConfig {
       model: { primary: string; fallbacks?: string[] };
       models: Record<string, Record<string, never>>;
     };
+    providers?: Record<string, { baseUrl: string; apiKey: string; api: string }>;
   };
   channels?: Record<string, { enabled: boolean; botToken: string; dmPolicy?: string; allowFrom?: string[] }>;
   plugins: {
@@ -76,6 +77,8 @@ export function generateOpenClawConfig(options: {
   allowedOrigins?: string[];
   /** Use Host-header fallback for origin check (local dev only) */
   useHostHeaderFallback?: boolean;
+  /** Custom provider configuration (goes into agents.providers in openclaw.json) */
+  customProvider?: { baseUrl: string; apiKey: string; apiFormat: CustomApiFormat; modelId: string };
 }): OpenClawConfig {
   const { port, token } = options;
   const channels = options.enabledChannels ?? CHANNEL_PLUGINS;
@@ -165,6 +168,35 @@ export function generateOpenClawConfig(options: {
     };
   }
 
+  // Add custom provider to agents.providers and models allowlist
+  if (options.customProvider) {
+    const { baseUrl, apiKey, apiFormat, modelId } = options.customProvider;
+    const customModelId = `custom/${modelId}`;
+    if (!config.agents) {
+      config.agents = {
+        defaults: {
+          model: { primary: customModelId },
+          models: { [customModelId]: {} as Record<string, never> },
+        },
+      };
+    } else {
+      config.agents.defaults.models[customModelId] = {} as Record<string, never>;
+      // If no other providers, make custom the primary
+      if (activeProviders.length === 0) {
+        config.agents.defaults.model = { primary: customModelId };
+      } else {
+        // Add to fallbacks
+        const existing = config.agents.defaults.model;
+        const fallbacks = existing.fallbacks ?? [];
+        fallbacks.push(customModelId);
+        existing.fallbacks = fallbacks;
+      }
+    }
+    config.agents.providers = {
+      custom: { baseUrl, apiKey, api: apiFormat },
+    };
+  }
+
   // Configure channel tokens (e.g. Telegram bot token)
   const ct = options.channelTokens;
   if (ct) {
@@ -214,15 +246,23 @@ export function mergeOpenClawConfig(
   gw.controlUi = generated.gateway.controlUi;
   gw.trustedProxies = generated.gateway.trustedProxies;
 
-  // Platform-managed: agents.defaults.model + agents.defaults.models
+  // Platform-managed: agents.defaults.model + agents.defaults.models + agents.providers
   if (generated.agents) {
     if (typeof merged.agents !== 'object' || merged.agents === null) {
       merged.agents = {};
     }
-    (merged.agents as Record<string, unknown>).defaults = generated.agents.defaults;
+    const ma = merged.agents as Record<string, unknown>;
+    ma.defaults = generated.agents.defaults;
+    if (generated.agents.providers) {
+      ma.providers = generated.agents.providers;
+    } else {
+      delete ma.providers;
+    }
   } else if (merged.agents && typeof merged.agents === 'object') {
     // No active providers — clear managed defaults but preserve other agent settings
-    delete (merged.agents as Record<string, unknown>).defaults;
+    const ma = merged.agents as Record<string, unknown>;
+    delete ma.defaults;
+    delete ma.providers;
   }
 
   // Platform-managed: channels

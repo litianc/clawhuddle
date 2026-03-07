@@ -2,7 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { getDb } from '../../db/index.js';
 import { v4 as uuid } from 'uuid';
 import { requireRole } from '../../middleware/auth.js';
-import { PROVIDER_IDS, type SetApiKeyRequest, type CredentialType } from '@clawhuddle/shared';
+import { PROVIDER_IDS, CUSTOM_PROVIDER_ID, type SetApiKeyRequest, type CredentialType, type CustomApiFormat } from '@clawhuddle/shared';
 import { syncAuthProfiles } from '../../services/gateway.js';
 
 // WARNING: base64 is NOT real encryption — it only obscures keys in the DB.
@@ -38,6 +38,9 @@ export async function orgApiKeyRoutes(app: FastifyInstance) {
           key_value: undefined,
           credential_type: k.credential_type || 'api_key',
           default_model: k.default_model || null,
+          base_url: k.base_url || null,
+          api_format: k.api_format || null,
+          custom_label: k.custom_label || null,
         })),
       };
     }
@@ -48,13 +51,21 @@ export async function orgApiKeyRoutes(app: FastifyInstance) {
     '/api/orgs/:orgId/api-keys',
     { preHandler: requireRole('owner', 'admin') },
     async (request, reply) => {
-      const { provider, key, credentialType, defaultModel } = request.body;
+      const { provider, key, credentialType, defaultModel, baseUrl, apiFormat, customLabel } = request.body;
       if (!provider || !key) {
         return reply.status(400).send({ error: 'validation', message: 'provider and key are required' });
       }
       if (!PROVIDER_IDS.includes(provider)) {
         return reply.status(400).send({ error: 'validation', message: `Unknown provider: ${provider}` });
       }
+
+      // Custom provider requires additional fields
+      if (provider === CUSTOM_PROVIDER_ID) {
+        if (!baseUrl || !apiFormat || !defaultModel) {
+          return reply.status(400).send({ error: 'validation', message: 'baseUrl, apiFormat, and defaultModel are required for custom provider' });
+        }
+      }
+
       const ct: CredentialType = credentialType === 'token' ? 'token' : credentialType === 'oauth' ? 'oauth' : 'api_key';
 
       const db = getDb();
@@ -63,13 +74,16 @@ export async function orgApiKeyRoutes(app: FastifyInstance) {
 
       const id = uuid();
       db.prepare(
-        'INSERT INTO api_keys (id, provider, key_value, is_company_default, org_id, credential_type, default_model) VALUES (?, ?, ?, 1, ?, ?, ?)'
-      ).run(id, provider, encodeKey(key), request.orgId!, ct, defaultModel || null);
+        'INSERT INTO api_keys (id, provider, key_value, is_company_default, org_id, credential_type, default_model, base_url, api_format, custom_label) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)'
+      ).run(id, provider, encodeKey(key), request.orgId!, ct, defaultModel || null, baseUrl || null, apiFormat || null, customLabel || null);
 
       syncAuthProfiles(request.orgId!);
 
       return reply.status(201).send({
-        data: { id, provider, key_masked: maskKey(key), is_company_default: true, credential_type: ct, default_model: defaultModel || null },
+        data: {
+          id, provider, key_masked: maskKey(key), is_company_default: true, credential_type: ct,
+          default_model: defaultModel || null, base_url: baseUrl || null, api_format: apiFormat || null, custom_label: customLabel || null,
+        },
       });
     }
   );
@@ -117,15 +131,21 @@ export function getOrgApiKey(orgId: string, provider: string): string | null {
 }
 
 // Returns all org API keys (decrypted) for auth-profiles.json generation
-export function getOrgAllApiKeys(orgId: string): { provider: string; key: string; credential_type: CredentialType; default_model: string | null }[] {
+export function getOrgAllApiKeys(orgId: string): {
+  provider: string; key: string; credential_type: CredentialType; default_model: string | null;
+  base_url: string | null; api_format: CustomApiFormat | null; custom_label: string | null;
+}[] {
   const db = getDb();
   const rows = db.prepare(
-    'SELECT provider, key_value, credential_type, default_model FROM api_keys WHERE is_company_default = 1 AND org_id = ?'
-  ).all(orgId) as { provider: string; key_value: string; credential_type: string; default_model: string | null }[];
+    'SELECT provider, key_value, credential_type, default_model, base_url, api_format, custom_label FROM api_keys WHERE is_company_default = 1 AND org_id = ?'
+  ).all(orgId) as { provider: string; key_value: string; credential_type: string; default_model: string | null; base_url: string | null; api_format: string | null; custom_label: string | null }[];
   return rows.map((r) => ({
     provider: r.provider,
     key: decodeKey(r.key_value),
     credential_type: (r.credential_type || 'api_key') as CredentialType,
     default_model: r.default_model || null,
+    base_url: r.base_url || null,
+    api_format: (r.api_format || null) as CustomApiFormat | null,
+    custom_label: r.custom_label || null,
   }));
 }

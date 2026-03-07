@@ -117,6 +117,10 @@ export interface BatchUpdateUserSkillsRequest {
 
 // === Provider Registry ===
 
+export const CUSTOM_PROVIDER_ID = 'custom';
+
+export type CustomApiFormat = 'openai-completions' | 'openai-responses' | 'anthropic-messages';
+
 export type CredentialType = 'api_key' | 'token' | 'oauth';
 
 export interface ModelOption {
@@ -162,7 +166,7 @@ export const PROVIDERS: ProviderConfig[] = [
   { id: 'google', label: 'Google Gemini', envVar: 'GEMINI_API_KEY', placeholder: 'AIza...', defaultModel: 'google/gemini-2.5-pro' },
 ];
 
-export const PROVIDER_IDS = PROVIDERS.map((p) => p.id);
+export const PROVIDER_IDS = [...PROVIDERS.map((p) => p.id), CUSTOM_PROVIDER_ID];
 
 export interface SetApiKeyRequest {
   provider: string;
@@ -170,4 +174,10 @@ export interface SetApiKeyRequest {
   credentialType?: CredentialType;
   /** User-selected default model for this provider */
   defaultModel?: string;
+  /** Base URL for custom provider (required when provider === 'custom') */
+  baseUrl?: string;
+  /** API format for custom provider (required when provider === 'custom') */
+  apiFormat?: CustomApiFormat;
+  /** Display name for custom provider */
+  customLabel?: string;
 }
