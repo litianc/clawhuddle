@@ -4,10 +4,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { getDb } from "../db/index.js";
 import { getOrgAllApiKeys } from "../routes/org/api-keys.js";
-import { generateOpenClawConfig, mergeOpenClawConfig, type ChannelTokens } from "./openclaw-config.js";
+import { generateOpenClawConfig, mergeOpenClawConfig, type ChannelTokens, type CustomProviderInput } from "./openclaw-config.js";
 import { installSkillsForUser } from "./skill-installer.js";
 import type { Skill, OrgMember } from "@clawhuddle/shared";
-import { PROVIDERS, CUSTOM_PROVIDER_ID, type CustomApiFormat } from "@clawhuddle/shared";
+import { PROVIDERS, CUSTOM_PROVIDER_ID } from "@clawhuddle/shared";
 
 const docker = new Docker();
 
@@ -166,30 +166,22 @@ function createTraefikLabels(
   };
 }
 
-interface CustomProviderData {
-  baseUrl: string;
-  apiKey: string;
-  apiFormat: CustomApiFormat;
-  modelId: string;
-}
-
 /**
  * Writes auth-profiles.json for a gateway so OpenClaw reads credentials
  * from the file (hot-reloaded) instead of env vars.
  * Returns the list of provider IDs that have credentials configured.
- * Custom provider credentials go into openclaw.json (not auth-profiles.json).
  */
-function writeAuthProfiles(orgId: string, userId: string): { providerIds: string[]; modelOverrides: Record<string, string>; customProvider?: CustomProviderData } {
+function writeAuthProfiles(orgId: string, userId: string): { providerIds: string[]; modelOverrides: Record<string, string>; customProvider?: CustomProviderInput } {
   const allKeys = getOrgAllApiKeys(orgId);
   const profiles: Record<string, Record<string, unknown>> = {};
   const providerIds: string[] = [];
   const modelOverrides: Record<string, string> = {};
-  let customProvider: CustomProviderData | undefined;
+  let customProvider: CustomProviderInput | undefined;
 
   for (const { provider, key, credential_type, default_model, base_url, api_format, custom_label } of allKeys) {
-    // Custom provider credentials go into openclaw.json agents.providers, not auth-profiles
+    // Custom provider: configured via models.providers in openclaw.json, not auth-profiles
     if (provider === CUSTOM_PROVIDER_ID) {
-      if (base_url && api_format && default_model) {
+      if (base_url && default_model && api_format) {
         customProvider = { baseUrl: base_url, apiKey: key, apiFormat: api_format, modelId: default_model };
       }
       continue;
@@ -259,7 +251,7 @@ function writeAuthProfiles(orgId: string, userId: string): { providerIds: string
 /**
  * Live-update auth-profiles.json for all running gateways in an org.
  * Called after API key add/delete so credentials propagate without container restart.
- * Also patches openclaw.json to update agents.providers for custom provider changes.
+ * Also patches openclaw.json to update model defaults for custom provider changes.
  */
 export function syncAuthProfiles(orgId: string): void {
   const db = getDb();
@@ -276,7 +268,7 @@ export function syncAuthProfiles(orgId: string): void {
 
     const { providerIds, modelOverrides, customProvider } = writeAuthProfiles(orgId, user_id);
 
-    // Patch openclaw.json in-place to update agents.providers and model defaults
+    // Patch openclaw.json in-place to update model defaults
     const configPath = path.join(gatewayDir, "openclaw.json");
     try {
       const existing = JSON.parse(fs.readFileSync(configPath, "utf-8"));
@@ -308,6 +300,89 @@ function getControlUiOrigins(subdomain: string): { allowedOrigins?: string[]; us
   return { allowedOrigins: [`http://${host}`, `https://${host}`] };
 }
 
+// Port range for local dev gateway host ports (mapped to external via cloud provider)
+const LOCAL_PORT_MIN = Number(process.env.GATEWAY_PORT_MIN) || 1000;
+const LOCAL_PORT_MAX = Number(process.env.GATEWAY_PORT_MAX) || 5000;
+const PORT_OFFSET = Number(process.env.GATEWAY_PORT_OFFSET) || 10000;
+// Offset from gateway port to Caddy HTTPS proxy port (e.g. 6100 → 8100)
+const CADDY_HTTPS_OFFSET = Number(process.env.CADDY_HTTPS_OFFSET) || 2000;
+const CADDY_ADMIN_URL = process.env.CADDY_ADMIN_URL || "http://127.0.0.1:2019";
+
+/** Allocate a deterministic host port for a gateway based on orgId+userId hash. */
+function allocateHostPort(orgId: string, userId: string): number {
+  const db = getDb();
+  // Check if this member already has an allocated port in range
+  const existing = db.prepare(
+    "SELECT gateway_port FROM org_members WHERE org_id = ? AND user_id = ? AND gateway_port BETWEEN ? AND ?"
+  ).get(orgId, userId, LOCAL_PORT_MIN, LOCAL_PORT_MAX) as { gateway_port: number } | undefined;
+  if (existing) return existing.gateway_port;
+
+  // Get all ports currently in use
+  const usedRows = db.prepare(
+    "SELECT gateway_port FROM org_members WHERE gateway_port BETWEEN ? AND ?"
+  ).all(LOCAL_PORT_MIN, LOCAL_PORT_MAX) as { gateway_port: number }[];
+  const usedPorts = new Set(usedRows.map((r) => r.gateway_port));
+
+  // Find first available port
+  for (let port = LOCAL_PORT_MIN; port <= LOCAL_PORT_MAX; port++) {
+    if (!usedPorts.has(port)) return port;
+  }
+  throw new Error(`No available ports in range ${LOCAL_PORT_MIN}-${LOCAL_PORT_MAX}`);
+}
+
+/** Register a Caddy HTTPS reverse proxy for a gateway port via admin API */
+async function addCaddyHttpsProxy(gatewayPort: number): Promise<void> {
+  const httpsPort = gatewayPort + CADDY_HTTPS_OFFSET;
+  const serverId = `gw-${gatewayPort}`;
+
+  const serverConfig = {
+    listen: [`:${httpsPort}`],
+    routes: [
+      {
+        handle: [
+          {
+            handler: "reverse_proxy",
+            upstreams: [{ dial: `localhost:${gatewayPort}` }],
+          },
+        ],
+      },
+    ],
+    tls_connection_policies: [{}],
+  };
+
+  try {
+    // Ensure internal TLS issuer policy with on_demand exists
+    await fetch(`${CADDY_ADMIN_URL}/config/apps/tls/automation`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ policies: [{ issuers: [{ module: "internal" }], on_demand: true }] }),
+    });
+
+    // Add the server block
+    await fetch(`${CADDY_ADMIN_URL}/config/apps/http/servers/${serverId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(serverConfig),
+    });
+    console.log(`[caddy] Added HTTPS proxy :${httpsPort} → localhost:${gatewayPort}`);
+  } catch (err) {
+    console.error(`[caddy] Failed to add HTTPS proxy for port ${gatewayPort}:`, err);
+  }
+}
+
+/** Remove a Caddy HTTPS reverse proxy for a gateway port */
+async function removeCaddyHttpsProxy(gatewayPort: number): Promise<void> {
+  const serverId = `gw-${gatewayPort}`;
+  try {
+    await fetch(`${CADDY_ADMIN_URL}/config/apps/http/servers/${serverId}`, {
+      method: "DELETE",
+    });
+    console.log(`[caddy] Removed HTTPS proxy for gateway port ${gatewayPort}`);
+  } catch (err) {
+    console.error(`[caddy] Failed to remove HTTPS proxy for port ${gatewayPort}:`, err);
+  }
+}
+
 function createContainerConfig(
   containerName: string,
   subdomain: string,
@@ -321,8 +396,9 @@ function createContainerConfig(
 
   // Local dev: publish socat port so gateway is accessible without Traefik
   if (IS_LOCAL_DEV) {
+    const hostPort = allocateHostPort(orgId, userId);
     hostConfig.PortBindings = {
-      [`${GATEWAY_EXTERNAL_PORT}/tcp`]: [{ HostPort: "0" }], // 0 = random available port
+      [`${GATEWAY_EXTERNAL_PORT}/tcp`]: [{ HostPort: String(hostPort) }],
     };
   }
 
@@ -439,6 +515,11 @@ export async function provisionGateway(orgId: string, memberId: string) {
       );
     }
 
+    // Register Caddy HTTPS proxy for this gateway port (non-blocking)
+    if (IS_LOCAL_DEV) {
+      addCaddyHttpsProxy(actualPort).catch(() => {});
+    }
+
     // Mark as deploying — getGatewayStatus will promote to running after health check
     db.prepare("UPDATE org_members SET gateway_status = ? WHERE id = ?").run(
       "deploying",
@@ -517,6 +598,11 @@ export async function removeGateway(orgId: string, memberId: string) {
     await container.remove();
   } catch {
     // Container may already be removed
+  }
+
+  // Remove Caddy HTTPS proxy
+  if (IS_LOCAL_DEV && member.gateway_port) {
+    removeCaddyHttpsProxy(member.gateway_port).catch(() => {});
   }
 
   // Delete workspace

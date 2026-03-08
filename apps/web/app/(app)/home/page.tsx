@@ -195,8 +195,14 @@ function DashboardView() {
   const openGateway = () => {
     if (!me?.gateway_token) return;
     const { protocol, hostname } = window.location;
-    if (hostname === 'localhost' && me.gateway_port) {
-      window.open(`http://localhost:${me.gateway_port}/?token=${me.gateway_token}`, '_blank');
+    const isIpOrLocalhost = hostname === 'localhost' || /^\d+\.\d+\.\d+\.\d+$/.test(hostname);
+    if (isIpOrLocalhost && me.gateway_port) {
+      const portOffset = Number(process.env.NEXT_PUBLIC_GATEWAY_PORT_OFFSET ?? 10000);
+      const httpsOffset = Number(process.env.NEXT_PUBLIC_CADDY_HTTPS_OFFSET ?? 2000);
+      // Use HTTPS via Caddy proxy: gateway_port + httpsOffset (+ external portOffset for remote)
+      const httpsPort = me.gateway_port + httpsOffset;
+      const externalPort = hostname === 'localhost' ? httpsPort : httpsPort + portOffset;
+      window.open(`https://${hostname}:${externalPort}/?token=${me.gateway_token}`, '_blank');
     } else if (me.gateway_subdomain) {
       const gwDomain = process.env.NEXT_PUBLIC_GATEWAY_DOMAIN || hostname;
       window.open(`${protocol}//${me.gateway_subdomain}.${gwDomain}/?token=${me.gateway_token}`, '_blank');

@@ -64,7 +64,7 @@ app.get('/api/health', async () => {
 });
 
 const port = Number(process.env.PORT) || 4000;
-const host = process.env.HOST || '0.0.0.0';
+const host = process.env.HOST || '127.0.0.1';
 
 await app.listen({ port, host });
 console.log(`API server running on http://${host}:${port}`);

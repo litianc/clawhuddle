@@ -210,8 +210,13 @@ export function MemberTable({ initialMembers }: Props) {
   const openGateway = (member: OrgMember) => {
     if (!member.gateway_token) return;
     const { protocol, hostname } = window.location;
-    if (hostname === 'localhost' && member.gateway_port) {
-      window.open(`http://localhost:${member.gateway_port}/?token=${member.gateway_token}`, '_blank');
+    const isIpOrLocalhost = hostname === 'localhost' || /^\d+\.\d+\.\d+\.\d+$/.test(hostname);
+    if (isIpOrLocalhost && member.gateway_port) {
+      const portOffset = Number(process.env.NEXT_PUBLIC_GATEWAY_PORT_OFFSET ?? 10000);
+      const httpsOffset = Number(process.env.NEXT_PUBLIC_CADDY_HTTPS_OFFSET ?? 2000);
+      const httpsPort = member.gateway_port + httpsOffset;
+      const externalPort = hostname === 'localhost' ? httpsPort : httpsPort + portOffset;
+      window.open(`https://${hostname}:${externalPort}/?token=${member.gateway_token}`, '_blank');
     } else if (member.gateway_subdomain) {
       const gwDomain = process.env.NEXT_PUBLIC_GATEWAY_DOMAIN || hostname;
       window.open(`${protocol}//${member.gateway_subdomain}.${gwDomain}/?token=${member.gateway_token}`, '_blank');

@@ -1,0 +1,11 @@
+{
+	auto_https disable_redirects
+}
+
+# ClawHuddle frontend HTTPS (internal 3443 → external 13443)
+:3443 {
+	tls internal {
+		on_demand
+	}
+	reverse_proxy localhost:3000
+}
